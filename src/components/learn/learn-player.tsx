@@ -148,7 +148,7 @@ export function LearnPlayer({
             <div className="mx-auto max-w-4xl px-4 py-6 lg:px-8">
               {/* content */}
               {current.type === "QUIZ" && current.quiz ? (
-                <QuizRunner quiz={current.quiz} onPassed={() => markComplete(current.id, true)} />
+                <QuizRunner key={current.quiz.id} quiz={current.quiz} onPassed={() => markComplete(current.id, true)} />
               ) : current.type === "ARTICLE" ? (
                 <article>
                   <h1 className="mb-4 font-display text-2xl font-black text-navy-900 dark:text-white">{current.title}</h1>
