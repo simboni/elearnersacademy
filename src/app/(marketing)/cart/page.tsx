@@ -52,6 +52,12 @@ export default function CartPage() {
       body: JSON.stringify({ courseIds: cart.items.map((i) => i.id), couponCode: coupon?.code }),
     });
     const data = await res.json();
+    if (data.ok && data.redirectUrl) {
+      // Real IntaSend payment — hand off to the hosted checkout.
+      cart.clear();
+      window.location.href = data.redirectUrl;
+      return;
+    }
     setLoading(false);
     if (data.ok) {
       cart.clear();

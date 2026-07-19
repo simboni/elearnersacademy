@@ -1,0 +1,22 @@
+# eLearners Academy — one-command production stack (SQLite on a named volume).
+# Usage:
+#   cp .env.production.example .env.production   # then fill in secrets
+#   docker compose up -d --build
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: "file:/data/prod.db"
+      PORT: "3000"
+      # Set to "true" to (re)seed demo content on next boot.
+      SEED_ON_START: "auto"
+    volumes:
+      - ela-data:/data
+
+volumes:
+  ela-data:

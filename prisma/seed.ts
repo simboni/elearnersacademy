@@ -642,6 +642,26 @@ async function main() {
       await prisma.pointLog.create({
         data: { userId: student.id, amount: 50, reason: `Enrolled in ${course.title}` },
       });
+      // Paid courses generate a PAID order, spread across the last ~7 months
+      const paid = course.discountPrice ?? course.price;
+      if (paid > 0) {
+        const monthsAgo = (i + c) % 7;
+        const createdAt = new Date();
+        createdAt.setMonth(createdAt.getMonth() - monthsAgo);
+        createdAt.setDate(3 + ((i * 2 + c) % 24));
+        await prisma.order.create({
+          data: {
+            userId: student.id,
+            total: paid,
+            currency: course.currency,
+            status: "PAID",
+            method: "intasend",
+            reference: `ELA-${Date.now().toString(36).toUpperCase()}-${i}${c}`,
+            createdAt,
+            items: { create: [{ courseId: course.id, price: paid }] },
+          },
+        });
+      }
       // review from ~70% of students
       if ((i + c) % 3 !== 0) {
         await prisma.review.create({

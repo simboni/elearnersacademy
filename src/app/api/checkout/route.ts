@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { getCurrentUser } from "@/lib/session";
-import { addPoints, awardBadge, touchStreak } from "@/lib/gamification";
+import { paymentsEnabled, createIntasendCheckout, fulfillOrder } from "@/lib/payments";
 
 /**
- * Simulated checkout. In production, wire this to IntaSend / M-Pesa STK push:
- * create the order as PENDING, redirect to the payment page, then confirm via webhook.
- * Here we accept the cart, apply an optional coupon, create a PAID order and enroll.
+ * Checkout.
+ * - Builds a PENDING order from the cart, applying an optional coupon.
+ * - If IntaSend keys are configured, returns a hosted-checkout redirect URL;
+ *   the order is fulfilled by the /api/webhooks/intasend webhook.
+ * - Otherwise (or when the total is 0), fulfils immediately in simulated mode.
  */
 export async function POST(req: Request) {
   const user = await getCurrentUser();
@@ -21,15 +23,16 @@ export async function POST(req: Request) {
   const courses = await prisma.course.findMany({ where: { id: { in: courseIds } } });
   if (!courses.length) return NextResponse.json({ error: "Courses not found" }, { status: 404 });
 
-  // discard already-enrolled
+  // Drop courses the user already owns.
   const already = await prisma.enrollment.findMany({
     where: { userId: user.id, courseId: { in: courseIds } },
     select: { courseId: true },
   });
   const alreadyIds = new Set(already.map((a) => a.courseId));
   const toBuy = courses.filter((c) => !alreadyIds.has(c.id));
+  if (!toBuy.length) return NextResponse.json({ error: "You already own these courses" }, { status: 400 });
 
-  let subtotal = toBuy.reduce((s, c) => s + (c.discountPrice ?? c.price), 0);
+  const subtotal = toBuy.reduce((s, c) => s + (c.discountPrice ?? c.price), 0);
   let discount = 0;
   let appliedCoupon: string | undefined;
 
@@ -39,48 +42,57 @@ export async function POST(req: Request) {
       if (coupon.percentOff) discount = Math.round((subtotal * coupon.percentOff) / 100);
       else if (coupon.amountOff) discount = Math.min(coupon.amountOff, subtotal);
       appliedCoupon = coupon.code;
-      await prisma.coupon.update({
-        where: { id: coupon.id },
-        data: { timesUsed: { increment: 1 } },
-      });
+      await prisma.coupon.update({ where: { id: coupon.id }, data: { timesUsed: { increment: 1 } } });
     }
   }
 
   const total = Math.max(0, subtotal - discount);
+  const currency = toBuy[0]?.currency ?? "KES";
 
   const order = await prisma.order.create({
     data: {
       userId: user.id,
       total,
-      status: "PAID",
+      currency,
+      status: "PENDING",
       method: "intasend",
       reference: `ELA-${Date.now().toString(36).toUpperCase()}`,
       couponCode: appliedCoupon,
-      items: {
-        create: toBuy.map((c) => ({ courseId: c.id, price: c.discountPrice ?? c.price })),
-      },
+      items: { create: toBuy.map((c) => ({ courseId: c.id, price: c.discountPrice ?? c.price })) },
     },
   });
 
-  for (const c of toBuy) {
-    await prisma.enrollment.upsert({
-      where: { userId_courseId: { userId: user.id, courseId: c.id } },
-      create: { userId: user.id, courseId: c.id },
-      update: {},
-    });
-    await prisma.notification.create({
-      data: {
-        userId: user.id,
-        type: "success",
-        title: `Purchase confirmed: ${c.title}`,
-        body: "You now have lifetime access. Start learning!",
-        link: `/learn/${c.slug}`,
-      },
-    });
+  // Free (or fully-discounted) orders need no payment.
+  if (total === 0) {
+    await fulfillOrder(order.id);
+    return NextResponse.json({ ok: true, reference: order.reference, total, simulated: true });
   }
-  await addPoints(user.id, 50, "Completed a purchase");
-  await awardBadge(user.id, "first-course");
-  await touchStreak(user.id);
 
-  return NextResponse.json({ ok: true, orderId: order.id, reference: order.reference, total });
+  // Real payment path.
+  if (paymentsEnabled()) {
+    try {
+      const origin = process.env.NEXTAUTH_URL || new URL(req.url).origin;
+      const [firstName, ...rest] = user.name.split(" ");
+      const { url, invoiceId } = await createIntasendCheckout({
+        amount: total,
+        currency,
+        email: user.email,
+        firstName: firstName || user.name,
+        lastName: rest.join(" "),
+        apiRef: order.id,
+        redirectUrl: `${origin}/checkout/success?ref=${order.reference}`,
+      });
+      if (invoiceId) {
+        await prisma.order.update({ where: { id: order.id }, data: { reference: invoiceId } });
+      }
+      return NextResponse.json({ ok: true, redirectUrl: url });
+    } catch (e) {
+      console.error(e);
+      return NextResponse.json({ error: "Could not start payment. Please try again." }, { status: 502 });
+    }
+  }
+
+  // Simulated fallback (no payment keys configured).
+  await fulfillOrder(order.id);
+  return NextResponse.json({ ok: true, reference: order.reference, total, simulated: true });
 }
